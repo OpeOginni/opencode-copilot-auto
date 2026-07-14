@@ -25,9 +25,3 @@ bun run check
 bun run test
 bun run build
 ```
-
-## Publish
-
-```sh
-npm publish --access public
-```
