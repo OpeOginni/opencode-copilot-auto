@@ -73,12 +73,13 @@ function installFetchAdapter() {
 
     const session = await getSession(originalFetch, request.headers)
     const model = await route(originalFetch, request.headers, session, payload)
+    const useResponses = usesResponses(model)
     const headers = new Headers(request.headers)
     headers.set("copilot-session-token", session.token)
     headers.set("X-GitHub-Api-Version", COPILOT_API_VERSION)
 
-    const next = usesResponses(model) ? toResponsesRequest(payload, model) : { ...payload, model }
-    const url = usesResponses(model) ? toResponsesUrl(request.url) : request.url
+    const next = useResponses ? toResponsesRequest(payload, model) : { ...payload, model }
+    const url = useResponses ? toResponsesUrl(request.url) : request.url
     const response = await originalFetch(
       new Request(url, {
         method: request.method,
@@ -87,7 +88,7 @@ function installFetchAdapter() {
         signal: request.signal,
       }),
     )
-    return usesResponses(model) ? wrapResponsesResponse(response) : response
+    return useResponses ? wrapResponsesResponse(response) : response
   }
   globalThis.fetch = Object.assign(adapter, originalFetch)
 }
@@ -205,6 +206,7 @@ function wrapResponsesResponse(response: Response): Response {
         controller.close()
         return
       }
+      // TypeScript cannot narrow reader inside closures, alias to satisfy the type checker
       const stream = reader
 
       function emitChunk(delta: Record<string, unknown>, finishReason?: string) {
@@ -331,7 +333,7 @@ async function route(
     body: JSON.stringify({
       prompt,
       available_models: session.availableModels,
-      has_image: false, // hardcoded, ceiling: detect image parts in payload.messages
+      has_image: false, // ceiling: hardcoded, detect image parts in payload.messages if needed
       ...(HYDRA_ROUTING
         ? {
             session_id: "opencode-session://auto",
