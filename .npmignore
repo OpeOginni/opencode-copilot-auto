@@ -4,3 +4,4 @@ tsconfig.json
 tsconfig.build.json
 bun.lock
 .gitignore
+src/copilot/README.md
