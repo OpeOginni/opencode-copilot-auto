@@ -1,0 +1,50 @@
+{
+  "name": "@opeoginni/opencode-copilot-auto",
+  "version": "0.1.0",
+  "description": "Add GitHub Copilot Auto model routing to OpenCode",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "github-copilot",
+    "copilot",
+    "auto-model"
+  ],
+  "license": "MIT",
+  "author": "Opeyemi Oginni",
+  "type": "module",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "rm -rf dist && bun build src/index.ts --outdir dist --target bun --format esm && tsc -p tsconfig.build.json",
+    "check": "tsc --noEmit",
+    "test": "bun test",
+    "prepack": "bun run check && bun run test && bun run build"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.17.20"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "^1.17.20",
+    "@opencode-ai/sdk": "^1.17.20",
+    "@types/bun": "^1.2.6",
+    "typescript": "^5.8.2"
+  },
+  "engines": {
+    "bun": ">=1.2.0"
+  }
+}
