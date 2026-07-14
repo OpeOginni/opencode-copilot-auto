@@ -1,0 +1,6 @@
+src/
+opencode.json
+tsconfig.json
+tsconfig.build.json
+bun.lock
+.gitignore

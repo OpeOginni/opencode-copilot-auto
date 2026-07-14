@@ -20,7 +20,7 @@ export const CopilotAutoPlugin: Plugin = async () => {
   return {
     provider: {
       id: "github-copilot",
-      models: async () => ({ auto: autoModel() }),
+      models: async (provider) => ({ ...provider.models, auto: autoModel() }),
     },
   }
 }
@@ -75,10 +75,14 @@ function installFetchAdapter() {
     const headers = new Headers(request.headers)
     headers.set("copilot-session-token", session.token)
 
+    const next = usesResponses(model) ? toResponsesRequest(payload, model) : { ...payload, model }
+    const url = usesResponses(model) ? toResponsesUrl(request.url) : request.url
     return originalFetch(
-      new Request(request, {
+      new Request(url, {
+        method: request.method,
         headers,
-        body: JSON.stringify({ ...payload, model }),
+        body: JSON.stringify(next),
+        signal: request.signal,
       }),
     )
   }
@@ -92,6 +96,35 @@ function isAutoRequest(request: Request) {
     request.method === "POST" &&
     (url.pathname.endsWith("/chat/completions") || url.pathname.endsWith("/responses"))
   )
+}
+
+function usesResponses(modelID: string) {
+  const match = /^gpt-(\d+)/.exec(modelID)
+  return Boolean(match && Number(match[1]) >= 5 && !modelID.startsWith("gpt-5-mini"))
+}
+
+function toResponsesUrl(url: string) {
+  return url.replace(/\/chat\/completions\/?$/, "/responses")
+}
+
+function toResponsesRequest(payload: Record<string, unknown>, model: string) {
+  const messages = Array.isArray(payload.messages) ? payload.messages : undefined
+  const input = messages ? promptText(messages) : typeof payload.input === "string" ? payload.input : promptText(payload.input)
+
+  return {
+    model,
+    input,
+    stream: payload.stream === true,
+    ...(typeof payload.temperature === "number" ? { temperature: payload.temperature } : {}),
+    ...(typeof payload.top_p === "number" ? { top_p: payload.top_p } : {}),
+    ...(typeof payload.max_tokens === "number"
+      ? { max_output_tokens: payload.max_tokens }
+      : typeof payload.max_completion_tokens === "number"
+        ? { max_output_tokens: payload.max_completion_tokens }
+        : {}),
+    ...(Array.isArray(payload.tools) ? { tools: payload.tools } : {}),
+    ...(payload.tool_choice !== undefined ? { tool_choice: payload.tool_choice } : {}),
+  }
 }
 
 async function getSession(fetcher: typeof fetch, requestHeaders: Headers) {
@@ -123,8 +156,14 @@ async function getSession(fetcher: typeof fetch, requestHeaders: Headers) {
   return session
 }
 
-async function route(fetcher: typeof fetch, requestHeaders: Headers, session: CopilotSession, payload: Record<string, unknown>) {
-  const prompt = promptText(payload.messages)
+async function route(
+  fetcher: typeof fetch,
+  requestHeaders: Headers,
+  session: CopilotSession,
+  payload: Record<string, unknown>,
+) {
+  const messages = payload.messages ?? payload.input
+  const prompt = promptText(messages)
   const headers = copilotHeaders(requestHeaders)
   headers.set("copilot-session-token", session.token)
   const response = await fetcher(`${COPILOT_BASE_URL}/models/session/intent`, {
@@ -136,7 +175,7 @@ async function route(fetcher: typeof fetch, requestHeaders: Headers, session: Co
       session_id: "opencode-session://auto",
       reference_count: 0,
       prompt_char_count: prompt.length,
-      turn_number: userTurns(payload.messages),
+      turn_number: userTurns(messages),
       routing_method: "hydra",
       copilot_plan: "individual",
     }),
@@ -158,7 +197,9 @@ function copilotHeaders(requestHeaders: Headers) {
 function parseJson(value: string): Record<string, unknown> | undefined {
   try {
     const parsed: unknown = JSON.parse(value)
-    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : undefined
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : undefined
   } catch {
     return undefined
   }
