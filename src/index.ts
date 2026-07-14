@@ -100,7 +100,7 @@ function isAutoRequest(request: Request) {
 
 function usesResponses(modelID: string) {
   const match = /^gpt-(\d+)/.exec(modelID)
-  return Boolean(match && Number(match[1]) >= 5 && !modelID.startsWith("gpt-5-mini"))
+  return Boolean(match && Number(match[1]) >= 5)
 }
 
 function toResponsesUrl(url: string) {
@@ -108,13 +108,22 @@ function toResponsesUrl(url: string) {
 }
 
 function toResponsesRequest(payload: Record<string, unknown>, model: string) {
-  const messages = Array.isArray(payload.messages) ? payload.messages : undefined
-  const input = messages ? promptText(messages) : typeof payload.input === "string" ? payload.input : promptText(payload.input)
+  const messages = Array.isArray(payload.messages) ? payload.messages as unknown[] : []
+  const instructions = messages
+    .filter((m) => isRecord(m) && m.role === "system")
+    .map((m) => (isRecord(m) && typeof m.content === "string" ? m.content : ""))
+    .filter(Boolean)
+    .join("\n")
+
+  const input = messages
+    .filter((m) => isRecord(m) && m.role !== "system")
+    .flatMap((m) => toResponsesInputItems(m as Record<string, unknown>))
 
   return {
     model,
     input,
     stream: payload.stream === true,
+    ...(instructions ? { instructions } : {}),
     ...(typeof payload.temperature === "number" ? { temperature: payload.temperature } : {}),
     ...(typeof payload.top_p === "number" ? { top_p: payload.top_p } : {}),
     ...(typeof payload.max_tokens === "number"
@@ -122,13 +131,55 @@ function toResponsesRequest(payload: Record<string, unknown>, model: string) {
       : typeof payload.max_completion_tokens === "number"
         ? { max_output_tokens: payload.max_completion_tokens }
         : {}),
-    ...(Array.isArray(payload.tools) ? { tools: flattenTools(payload.tools) } : {}),
+    ...(Array.isArray(payload.tools) ? { tools: payload.tools.map(unwrapFunction) } : {}),
     ...(payload.tool_choice !== undefined ? { tool_choice: unwrapFunction(payload.tool_choice) } : {}),
   }
 }
 
-function flattenTools(tools: unknown[]): unknown[] {
-  return tools.map(unwrapFunction)
+function toResponsesInputItems(msg: Record<string, unknown>): unknown[] {
+  const role = msg.role as string
+  const content = msg.content
+
+  if (role === "tool") {
+    return [{
+      type: "function_call_output",
+      call_id: msg.tool_call_id as string,
+      output: typeof content === "string" ? content : JSON.stringify(content),
+    }]
+  }
+
+  if (role === "assistant" && Array.isArray(msg.tool_calls)) {
+    const items: unknown[] = msg.tool_calls.map((tc) => {
+      if (!isRecord(tc) || !isRecord(tc.function)) return null
+      return {
+        type: "function_call",
+        call_id: tc.id as string,
+        name: tc.function.name as string,
+        arguments: tc.function.arguments as string,
+      }
+    }).filter((x) => x !== null)
+    if (typeof content === "string" && content) {
+      items.unshift({
+        role: "assistant",
+        content: [{ type: "output_text", text: content }],
+      })
+    }
+    return items
+  }
+
+  const text = typeof content === "string"
+    ? content
+    : Array.isArray(content)
+      ? content
+          .map((part) => (isRecord(part) && typeof part.text === "string" ? part.text : ""))
+          .filter(Boolean)
+          .join("\n")
+      : ""
+
+  return [{
+    role,
+    content: [{ type: role === "user" ? "input_text" : "output_text", text }],
+  }]
 }
 
 function unwrapFunction(value: unknown): unknown {
