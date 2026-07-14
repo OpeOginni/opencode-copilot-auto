@@ -75,6 +75,7 @@ function installFetchAdapter() {
     const model = await route(originalFetch, request.headers, session, payload)
     const headers = new Headers(request.headers)
     headers.set("copilot-session-token", session.token)
+    headers.set("X-GitHub-Api-Version", COPILOT_API_VERSION)
 
     const next = usesResponses(model) ? toResponsesRequest(payload, model) : { ...payload, model }
     const url = usesResponses(model) ? toResponsesUrl(request.url) : request.url
@@ -352,7 +353,7 @@ async function route(
 
 function copilotHeaders(requestHeaders: Headers) {
   const headers = new Headers(requestHeaders)
-  headers.set("Content-Type", "text/plain;charset=UTF-8")
+  headers.set("Content-Type", "application/json")
   headers.set("X-GitHub-Api-Version", COPILOT_API_VERSION)
   return headers
 }
