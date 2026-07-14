@@ -119,7 +119,52 @@ function toResponsesRequest(payload: Record<string, unknown>, model: string) {
 
   const input = messages
     .filter((m) => isRecord(m) && m.role !== "system")
-    .flatMap((m) => toResponsesInputItems(m as Record<string, unknown>))
+    .flatMap((m) => {
+      const msg = m as Record<string, unknown>
+      const role = msg.role as string
+      const content = msg.content
+
+      if (role === "tool") {
+        return [{
+          type: "function_call_output",
+          call_id: msg.tool_call_id as string,
+          output: typeof content === "string" ? content : JSON.stringify(content),
+        }]
+      }
+
+      if (role === "assistant" && Array.isArray(msg.tool_calls)) {
+        const items: unknown[] = msg.tool_calls.map((tc) => {
+          if (!isRecord(tc) || !isRecord(tc.function)) return null
+          return {
+            type: "function_call",
+            call_id: tc.id as string,
+            name: tc.function.name as string,
+            arguments: tc.function.arguments as string,
+          }
+        }).filter((x) => x !== null)
+        if (typeof content === "string" && content) {
+          items.unshift({
+            role: "assistant",
+            content: [{ type: "output_text", text: content }],
+          })
+        }
+        return items
+      }
+
+      const text = typeof content === "string"
+        ? content
+        : Array.isArray(content)
+          ? content
+              .map((part) => (isRecord(part) && typeof part.text === "string" ? part.text : ""))
+              .filter(Boolean)
+              .join("\n")
+          : ""
+
+      return [{
+        role,
+        content: [{ type: role === "user" ? "input_text" : "output_text", text }],
+      }]
+    })
 
   return {
     model,
@@ -136,52 +181,6 @@ function toResponsesRequest(payload: Record<string, unknown>, model: string) {
     ...(Array.isArray(payload.tools) ? { tools: payload.tools.map(unwrapFunction) } : {}),
     ...(payload.tool_choice !== undefined ? { tool_choice: unwrapFunction(payload.tool_choice) } : {}),
   }
-}
-
-function toResponsesInputItems(msg: Record<string, unknown>): unknown[] {
-  const role = msg.role as string
-  const content = msg.content
-
-  if (role === "tool") {
-    return [{
-      type: "function_call_output",
-      call_id: msg.tool_call_id as string,
-      output: typeof content === "string" ? content : JSON.stringify(content),
-    }]
-  }
-
-  if (role === "assistant" && Array.isArray(msg.tool_calls)) {
-    const items: unknown[] = msg.tool_calls.map((tc) => {
-      if (!isRecord(tc) || !isRecord(tc.function)) return null
-      return {
-        type: "function_call",
-        call_id: tc.id as string,
-        name: tc.function.name as string,
-        arguments: tc.function.arguments as string,
-      }
-    }).filter((x) => x !== null)
-    if (typeof content === "string" && content) {
-      items.unshift({
-        role: "assistant",
-        content: [{ type: "output_text", text: content }],
-      })
-    }
-    return items
-  }
-
-  const text = typeof content === "string"
-    ? content
-    : Array.isArray(content)
-      ? content
-          .map((part) => (isRecord(part) && typeof part.text === "string" ? part.text : ""))
-          .filter(Boolean)
-          .join("\n")
-      : ""
-
-  return [{
-    role,
-    content: [{ type: role === "user" ? "input_text" : "output_text", text }],
-  }]
 }
 
 function unwrapFunction(value: unknown): unknown {
@@ -229,6 +228,7 @@ function wrapResponsesResponse(response: Response): Response {
           if (type === "response.output_text.delta") {
             emitChunk({ content: event.delta })
           } else if (type === "response.output_item.added" && event.item?.type === "function_call") {
+            // ceiling: only function_call items, no file_search/code_interpreter/image_gen
             toolCallIndex++
             emitChunk({
               tool_calls: [{
@@ -250,7 +250,7 @@ function wrapResponsesResponse(response: Response): Response {
             controller.enqueue(encoder.encode("data: [DONE]\n\n"))
           }
         } catch {
-          // skip unparseable lines
+          // ceiling: malformed SSE lines dropped silently, log for debugging if needed
         }
       }
 
@@ -330,7 +330,7 @@ async function route(
     body: JSON.stringify({
       prompt,
       available_models: session.availableModels,
-      has_image: false,
+      has_image: false, // hardcoded, ceiling: detect image parts in payload.messages
       ...(HYDRA_ROUTING
         ? {
             session_id: "opencode-session://auto",
