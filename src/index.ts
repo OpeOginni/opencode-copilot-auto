@@ -77,7 +77,7 @@ function installFetchAdapter() {
 
     const next = usesResponses(model) ? toResponsesRequest(payload, model) : { ...payload, model }
     const url = usesResponses(model) ? toResponsesUrl(request.url) : request.url
-    return originalFetch(
+    const response = await originalFetch(
       new Request(url, {
         method: request.method,
         headers,
@@ -85,6 +85,7 @@ function installFetchAdapter() {
         signal: request.signal,
       }),
     )
+    return usesResponses(model) ? wrapResponsesResponse(response) : response
   }
   globalThis.fetch = Object.assign(adapter, originalFetch)
 }
@@ -186,6 +187,101 @@ function unwrapFunction(value: unknown): unknown {
   if (!isRecord(value) || !isRecord(value.function)) return value
   const { function: fn, ...rest } = value
   return { ...fn, ...rest }
+}
+
+function wrapResponsesResponse(response: Response): Response {
+  const chunkId = `chatcmpl-auto-${Date.now()}`
+  const decoder = new TextDecoder()
+  const encoder = new TextEncoder()
+
+  let buffer = ""
+  let toolCallIndex = -1
+
+  const transformed = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const reader = response.body?.getReader()
+      if (!reader) {
+        controller.close()
+        return
+      }
+      const stream = reader
+
+      function emitChunk(delta: Record<string, unknown>, finishReason?: string) {
+        const chunk = {
+          id: chunkId,
+          object: "chat.completion.chunk",
+          choices: [{ index: 0, delta, ...(finishReason ? { finish_reason: finishReason } : {}) }],
+        }
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`))
+      }
+
+      function processLine(line: string) {
+        if (line.startsWith("event:")) return
+        if (!line.startsWith("data:")) return
+        const data = line.slice(5).trim()
+        if (data === "[DONE]") return
+
+        try {
+          const event = JSON.parse(data)
+          const type = event.type as string
+
+          if (type === "response.output_text.delta") {
+            emitChunk({ content: event.delta })
+          } else if (type === "response.output_item.added" && event.item?.type === "function_call") {
+            toolCallIndex++
+            emitChunk({
+              tool_calls: [{
+                index: toolCallIndex,
+                id: event.item.call_id,
+                type: "function",
+                function: { name: event.item.name, arguments: "" },
+              }],
+            })
+          } else if (type === "response.function_call_arguments.delta") {
+            emitChunk({
+              tool_calls: [{
+                index: toolCallIndex,
+                function: { arguments: event.delta },
+              }],
+            })
+          } else if (type === "response.completed") {
+            emitChunk({}, "stop")
+            controller.enqueue(encoder.encode("data: [DONE]\n\n"))
+          }
+        } catch {
+          // skip unparseable lines
+        }
+      }
+
+      function pump(): Promise<void> {
+        return stream.read().then(({ done, value }) => {
+          if (done) {
+            if (buffer) {
+              for (const line of buffer.split("\n")) processLine(line)
+            }
+            controller.close()
+            return
+          }
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split("\n")
+          buffer = lines.pop() ?? ""
+          for (const line of lines) processLine(line)
+          return pump()
+        })
+      }
+
+      pump().catch(() => controller.close())
+    },
+  })
+
+  return new Response(transformed, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: new Headers({
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+    }),
+  })
 }
 
 async function getSession(fetcher: typeof fetch, requestHeaders: Headers) {
