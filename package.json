@@ -1,6 +1,6 @@
 {
   "name": "@opeoginni/opencode-copilot-auto",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Add GitHub Copilot Auto model routing to OpenCode",
   "keywords": [
     "opencode",
