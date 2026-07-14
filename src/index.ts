@@ -2,7 +2,7 @@ import type { Plugin } from "@opencode-ai/plugin"
 import type { Model } from "@opencode-ai/sdk/v2"
 
 const COPILOT_BASE_URL = "https://api.individual.githubcopilot.com"
-const COPILOT_API_VERSION = "2026-06-01"
+const COPILOT_API_VERSION = "2026-07-01"
 const SESSION_REFRESH_BUFFER_SECONDS = 30
 
 type CopilotSession = {
