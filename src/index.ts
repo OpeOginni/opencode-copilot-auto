@@ -182,12 +182,7 @@ async function route(
     body: JSON.stringify({
       prompt,
       available_models: session.availableModels,
-      session_id: "opencode-session://auto",
-      reference_count: 0,
-      prompt_char_count: prompt.length,
-      turn_number: userTurns(messages),
-      routing_method: "hydra",
-      copilot_plan: "individual",
+      has_image: false,
     }),
     signal: AbortSignal.timeout(5_000),
   })
@@ -226,10 +221,6 @@ function promptText(messages: unknown) {
     .map((part) => (isRecord(part) && typeof part.text === "string" ? part.text : ""))
     .filter(Boolean)
     .join("\n")
-}
-
-function userTurns(messages: unknown) {
-  return Array.isArray(messages) ? messages.filter((item) => isRecord(item) && item.role === "user").length : 0
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
