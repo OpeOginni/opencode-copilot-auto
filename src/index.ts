@@ -122,9 +122,19 @@ function toResponsesRequest(payload: Record<string, unknown>, model: string) {
       : typeof payload.max_completion_tokens === "number"
         ? { max_output_tokens: payload.max_completion_tokens }
         : {}),
-    ...(Array.isArray(payload.tools) ? { tools: payload.tools } : {}),
-    ...(payload.tool_choice !== undefined ? { tool_choice: payload.tool_choice } : {}),
+    ...(Array.isArray(payload.tools) ? { tools: flattenTools(payload.tools) } : {}),
+    ...(payload.tool_choice !== undefined ? { tool_choice: unwrapFunction(payload.tool_choice) } : {}),
   }
+}
+
+function flattenTools(tools: unknown[]): unknown[] {
+  return tools.map(unwrapFunction)
+}
+
+function unwrapFunction(value: unknown): unknown {
+  if (!isRecord(value) || !isRecord(value.function)) return value
+  const { function: fn, ...rest } = value
+  return { ...fn, ...rest }
 }
 
 async function getSession(fetcher: typeof fetch, requestHeaders: Headers) {

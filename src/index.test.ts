@@ -1,13 +1,13 @@
 import { expect, test } from "bun:test"
 import { CopilotAutoPlugin } from "./index"
 
-async function runAutoRequest(chosenModel: string) {
+async function runAutoRequest(chosenModel: string, body?: Record<string, unknown>) {
   const calls: Array<{ url: string; body: Record<string, unknown>; headers: Headers }> = []
   const original = globalThis.fetch
   const mock = async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = new Request(input, init)
-    const body = JSON.parse((await request.text()) || "{}") as Record<string, unknown>
-    calls.push({ url: request.url, body, headers: request.headers })
+    const parsed = JSON.parse((await request.text()) || "{}") as Record<string, unknown>
+    calls.push({ url: request.url, body: parsed, headers: request.headers })
 
     if (request.url.endsWith("/models/session")) {
       return Response.json({
@@ -30,7 +30,7 @@ async function runAutoRequest(chosenModel: string) {
     await fetch("https://api.individual.githubcopilot.com/chat/completions", {
       method: "POST",
       headers: { Authorization: "Bearer token", "Content-Type": "application/json" },
-      body: JSON.stringify({ model: "auto", messages: [{ role: "user", content: "Fix this bug" }] }),
+      body: JSON.stringify(body ?? { model: "auto", messages: [{ role: "user", content: "Fix this bug" }] }),
     })
   } finally {
     globalThis.fetch = original
@@ -55,6 +55,64 @@ test("keeps non-GPT auto requests on /chat/completions", async () => {
   expect(final.url).toBe("https://api.individual.githubcopilot.com/chat/completions")
   expect(final.body.model).toBe("claude-haiku-4.5")
   expect(final.headers.get("copilot-session-token")).toBe("session-token")
+})
+
+test("converts chat completions tool schema to responses format", async () => {
+  const calls = await runAutoRequest("gpt-5.4-mini", {
+    model: "auto",
+    messages: [{ role: "user", content: "test" }],
+    tools: [
+      {
+        type: "function",
+        function: {
+          name: "get_weather",
+          description: "Get weather",
+          parameters: { type: "object", properties: { location: { type: "string" } } },
+        },
+      },
+    ],
+    tool_choice: { type: "function", function: { name: "get_weather" } },
+  })
+
+  const final = calls.at(-1)!
+  expect(final.url).toBe("https://api.individual.githubcopilot.com/responses")
+  const tools = final.body.tools as Array<Record<string, unknown>>
+  expect(tools[0].name).toBe("get_weather")
+  expect(tools[0].description).toBe("Get weather")
+  expect(tools[0].parameters).toEqual({ type: "object", properties: { location: { type: "string" } } })
+  expect(tools[0].function).toBeUndefined()
+  expect(tools[0].type).toBe("function")
+  const toolChoice = final.body.tool_choice as Record<string, unknown>
+  expect(toolChoice.name).toBe("get_weather")
+  expect(toolChoice.type).toBe("function")
+  expect(toolChoice.function).toBeUndefined()
+})
+
+test("passes through tools already in responses format", async () => {
+  const calls = await runAutoRequest("gpt-5.4-mini", {
+    model: "auto",
+    messages: [{ role: "user", content: "test" }],
+    tools: [
+      { type: "function", name: "get_weather", description: "Get weather", parameters: { type: "object", properties: {} } },
+    ],
+  })
+
+  const final = calls.at(-1)!
+  const tools = final.body.tools as Array<Record<string, unknown>>
+  expect(tools[0].name).toBe("get_weather")
+  expect(tools[0].function).toBeUndefined()
+  expect(tools[0].type).toBe("function")
+})
+
+test("passes through string tool_choice unchanged", async () => {
+  const calls = await runAutoRequest("gpt-5.4-mini", {
+    model: "auto",
+    messages: [{ role: "user", content: "test" }],
+    tool_choice: "auto",
+  })
+
+  const final = calls.at(-1)!
+  expect(final.body.tool_choice).toBe("auto")
 })
 
 test("preserves models supplied by the built-in Copilot plugin", async () => {
