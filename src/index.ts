@@ -4,6 +4,7 @@ import type { Model } from "@opencode-ai/sdk/v2"
 const COPILOT_BASE_URL = "https://api.individual.githubcopilot.com"
 const COPILOT_API_VERSION = "2026-07-01"
 const SESSION_REFRESH_BUFFER_SECONDS = 30
+const HYDRA_ROUTING = false
 
 type CopilotSession = {
   availableModels: string[]
@@ -330,6 +331,16 @@ async function route(
       prompt,
       available_models: session.availableModels,
       has_image: false,
+      ...(HYDRA_ROUTING
+        ? {
+            session_id: "opencode-session://auto",
+            reference_count: 0,
+            prompt_char_count: prompt.length,
+            turn_number: userTurns(messages),
+            routing_method: "hydra",
+            copilot_plan: "individual",
+          }
+        : {}),
     }),
     signal: AbortSignal.timeout(5_000),
   })
@@ -368,6 +379,10 @@ function promptText(messages: unknown) {
     .map((part) => (isRecord(part) && typeof part.text === "string" ? part.text : ""))
     .filter(Boolean)
     .join("\n")
+}
+
+function userTurns(messages: unknown) {
+  return Array.isArray(messages) ? messages.filter((item) => isRecord(item) && item.role === "user").length : 0
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
