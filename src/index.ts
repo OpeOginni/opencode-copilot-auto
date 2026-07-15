@@ -1,4 +1,4 @@
-import type { Plugin } from "@opencode-ai/plugin"
+import type { Plugin, PluginInput } from "@opencode-ai/plugin"
 import type { Model } from "@opencode-ai/sdk/v2"
 
 const COPILOT_BASE_URL = "https://api.individual.githubcopilot.com"
@@ -15,8 +15,30 @@ type CopilotSession = {
 
 const sessions = new Map<string, CopilotSession>()
 
-export const CopilotAutoPlugin: Plugin = async () => {
-  installFetchAdapter()
+type ToastClient = {
+  tui?: {
+    showToast?: (payload: { body: { title: string; message: string; variant: string } }) => Promise<void>
+  }
+}
+
+function hasToast(client: unknown): client is ToastClient {
+  return (
+    typeof client === "object" &&
+    client !== null &&
+    "tui" in client &&
+    typeof (client as ToastClient).tui?.showToast === "function"
+  )
+}
+
+async function notifyModelSelected(client: unknown, model: string): Promise<void> {
+  if (!hasToast(client)) return
+  await client.tui!.showToast!({
+    body: { title: "Copilot Auto", message: `Routed to ${model}`, variant: "info" },
+  }).catch(() => {})
+}
+
+export const CopilotAutoPlugin: Plugin = async (input) => {
+  installFetchAdapter(input.client)
 
   return {
     provider: {
@@ -75,7 +97,7 @@ function autoModel(): Model {
   }
 }
 
-function installFetchAdapter() {
+function installFetchAdapter(client?: PluginInput["client"]) {
   const marker = Symbol.for("opeoginni.opencode-copilot-auto.fetch-adapter")
   const runtime = globalThis as typeof globalThis & { [marker]?: true }
   if (runtime[marker]) return
@@ -92,6 +114,7 @@ function installFetchAdapter() {
 
     const session = await getSession(originalFetch, request.headers)
     const model = await route(originalFetch, request.headers, session, payload)
+    await notifyModelSelected(client, model)
     const useResponses = usesResponses(model)
     const headers = new Headers(request.headers)
     headers.set("copilot-session-token", session.token)
