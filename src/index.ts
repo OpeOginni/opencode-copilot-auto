@@ -5,6 +5,10 @@ const COPILOT_BASE_URL = "https://api.individual.githubcopilot.com"
 const COPILOT_API_VERSION = "2026-07-01"
 const SESSION_REFRESH_BUFFER_SECONDS = 30
 const HYDRA_ROUTING = false
+const PROJECTION_KEY = "copilot-auto"
+
+type NotifyMode = "toast" | "projection"
+let notifyMode: NotifyMode = "toast"
 
 type CopilotSession = {
   availableModels: string[]
@@ -22,6 +26,14 @@ type ToastClient = {
   }
 }
 
+type BusClient = {
+  bus?: {
+    publish?: (payload: { topic: string; body: { key: string; kind: string; content: string } }) => Promise<void>
+  }
+}
+
+type PluginClient = ToastClient & BusClient
+
 function hasToast(client: unknown): client is ToastClient {
   return (
     typeof client === "object" &&
@@ -31,23 +43,38 @@ function hasToast(client: unknown): client is ToastClient {
   )
 }
 
+function hasBus(client: unknown): client is BusClient {
+  return (
+    typeof client === "object" &&
+    client !== null &&
+    "bus" in client &&
+    typeof (client as BusClient).bus?.publish === "function"
+  )
+}
+
+async function notify(client: PluginClient, message: string): Promise<void> {
+  if (notifyMode === "projection" && hasBus(client)) {
+    await client.bus!.publish!({
+      topic: "companion.projection",
+      body: { key: PROJECTION_KEY, kind: "markdown", content: message },
+    }).catch(() => {})
+    return
+  }
+  if (hasToast(client)) {
+    await client.tui!.showToast!({
+      body: { title: "Copilot Auto", message, variant: "info" },
+    }).catch(() => {})
+  }
+}
+
 async function notifyModelSelected(client: unknown, model: string): Promise<void> {
-  if (!hasToast(client)) return
-  await client.tui!.showToast!({
-    body: { title: "Copilot Auto", message: `Routed to ${model}`, variant: "info" },
-  }).catch(() => {})
+  await notify(client as PluginClient, `Routed to ${model}`)
 }
 
 export const CopilotAutoPlugin: Plugin = async (input) => {
   const client = input.client
   installFetchAdapter(client)
-
-  async function notify(message: string): Promise<void> {
-    if (!hasToast(client)) return
-    await client.tui!.showToast!({
-      body: { title: "Copilot Auto", message, variant: "info" },
-    }).catch(() => {})
-  }
+  const notifyClient = (message: string) => notify(client as unknown as PluginClient, message)
 
   return {
     provider: {
@@ -64,11 +91,15 @@ export const CopilotAutoPlugin: Plugin = async (input) => {
         template: "/copilot-autorefresh",
         description: "Toggle automatic model re-selection on every prompt",
       }
+      input.command["copilot-notify"] ??= {
+        template: "/copilot-notify",
+        description: "Toggle between toast and projection bus notifications",
+      }
     },
     "command.execute.before": async (input, output) => {
       if (input.command === "copilot-refresh") {
         sessions.clear()
-        await notify("Routing cache cleared. Next prompt will select a fresh model.")
+        await notifyClient("Routing cache cleared. Next prompt will select a fresh model.")
         output.parts.length = 0
         output.parts.push({
           id: crypto.randomUUID(),
@@ -81,7 +112,7 @@ export const CopilotAutoPlugin: Plugin = async (input) => {
       }
       if (input.command === "copilot-autorefresh") {
         autoRefresh = !autoRefresh
-        await notify(
+        await notifyClient(
           autoRefresh
             ? "Refresh enabled. Every prompt will select a fresh model."
             : "Refresh disabled. Reusing cached routing session.",
@@ -95,6 +126,19 @@ export const CopilotAutoPlugin: Plugin = async (input) => {
           text: autoRefresh
             ? "Copilot Auto refresh enabled. Every prompt will select a fresh model."
             : "Copilot Auto refresh disabled. Reusing cached routing session.",
+        })
+        return
+      }
+      if (input.command === "copilot-notify") {
+        notifyMode = notifyMode === "toast" ? "projection" : "toast"
+        await notifyClient(`Notification mode: ${notifyMode}`)
+        output.parts.length = 0
+        output.parts.push({
+          id: crypto.randomUUID(),
+          sessionID: input.sessionID,
+          messageID: crypto.randomUUID(),
+          type: "text",
+          text: `Copilot Auto notification mode: ${notifyMode}`,
         })
         return
       }
