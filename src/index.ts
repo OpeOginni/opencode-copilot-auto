@@ -1,9 +1,14 @@
-import type { Plugin } from "@opencode-ai/plugin"
+import type { Plugin, PluginInput } from "@opencode-ai/plugin"
 import type { Model } from "@opencode-ai/sdk/v2"
 
 const COPILOT_BASE_URL = "https://api.individual.githubcopilot.com"
-const COPILOT_API_VERSION = "2026-06-01"
+const COPILOT_API_VERSION = "2026-07-01"
 const SESSION_REFRESH_BUFFER_SECONDS = 30
+const HYDRA_ROUTING = false
+const PROJECTION_KEY = "copilot-auto"
+
+type NotifyMode = "toast" | "projection"
+let notifyMode: NotifyMode = "toast"
 
 type CopilotSession = {
   availableModels: string[]
@@ -13,14 +18,127 @@ type CopilotSession = {
 }
 
 const sessions = new Map<string, CopilotSession>()
+let autoRefresh = false
 
-export const CopilotAutoPlugin: Plugin = async () => {
-  installFetchAdapter()
+type ToastClient = {
+  tui?: {
+    showToast?: (payload: { body: { title: string; message: string; variant: string } }) => Promise<void>
+  }
+}
+
+type BusClient = {
+  bus?: {
+    publish?: (payload: { topic: string; body: { key: string; kind: string; content: string } }) => Promise<void>
+  }
+}
+
+type PluginClient = ToastClient & BusClient
+
+function hasToast(client: unknown): client is ToastClient {
+  return (
+    typeof client === "object" &&
+    client !== null &&
+    "tui" in client &&
+    typeof (client as ToastClient).tui?.showToast === "function"
+  )
+}
+
+function hasBus(client: unknown): client is BusClient {
+  return (
+    typeof client === "object" &&
+    client !== null &&
+    "bus" in client &&
+    typeof (client as BusClient).bus?.publish === "function"
+  )
+}
+
+async function notify(client: PluginClient, message: string): Promise<void> {
+  if (notifyMode === "projection" && hasBus(client)) {
+    await client.bus!.publish!({
+      topic: "companion.projection",
+      body: { key: PROJECTION_KEY, kind: "markdown", content: message },
+    }).catch(() => {})
+    return
+  }
+  if (hasToast(client)) {
+    await client.tui!.showToast!({
+      body: { title: "Copilot Auto", message, variant: "info" },
+    }).catch(() => {})
+  }
+}
+
+function makeTextPart(sessionID: string, text: string) {
+  return {
+    id: crypto.randomUUID(),
+    sessionID,
+    messageID: crypto.randomUUID(),
+    type: "text" as const,
+    text,
+  }
+}
+
+export const CopilotAutoPlugin: Plugin = async (input) => {
+  const client = input.client
+  installFetchAdapter(client)
+  const notifyClient = (message: string) => notify(client as unknown as PluginClient, message)
 
   return {
     provider: {
       id: "github-copilot",
       models: async (provider) => ({ ...provider.models, auto: autoModel() }),
+    },
+    config: async (input) => {
+      input.command ??= {}
+      input.command["copilot-refresh"] ??= {
+        template: "/copilot-refresh",
+        description: "Clear Copilot Auto routing cache so the next prompt re-selects a model",
+      }
+      input.command["copilot-autorefresh"] ??= {
+        template: "/copilot-autorefresh",
+        description: "Toggle automatic model re-selection on every prompt",
+      }
+      input.command["copilot-notify"] ??= {
+        template: "/copilot-notify",
+        description: "Toggle between toast and projection bus notifications",
+      }
+    },
+    "command.execute.before": async (input, output) => {
+      if (input.command === "copilot-refresh") {
+        sessions.clear()
+        await notifyClient("Routing cache cleared. Next prompt will select a fresh model.")
+        output.parts.length = 0
+        output.parts.push(makeTextPart(
+          input.sessionID,
+          "Copilot Auto routing cache cleared. The next prompt will select a fresh model.",
+        ))
+        return
+      }
+      if (input.command === "copilot-autorefresh") {
+        autoRefresh = !autoRefresh
+        await notifyClient(
+          autoRefresh
+            ? "Refresh enabled. Every prompt will select a fresh model."
+            : "Refresh disabled. Reusing cached routing session.",
+        )
+        output.parts.length = 0
+        output.parts.push(makeTextPart(
+          input.sessionID,
+          autoRefresh
+            ? "Copilot Auto refresh enabled. Every prompt will select a fresh model."
+            : "Copilot Auto refresh disabled. Reusing cached routing session.",
+        ))
+        return
+      }
+      if (input.command === "copilot-notify") {
+        notifyMode = notifyMode === "toast" ? "projection" : "toast"
+        await notifyClient(`Notification mode: ${notifyMode}`)
+        output.parts.length = 0
+        output.parts.push(makeTextPart(
+          input.sessionID,
+          `Copilot Auto notification mode: ${notifyMode}`,
+        ))
+        return
+      }
     },
   }
 }
@@ -55,7 +173,7 @@ function autoModel(): Model {
   }
 }
 
-function installFetchAdapter() {
+function installFetchAdapter(client?: PluginInput["client"]) {
   const marker = Symbol.for("opeoginni.opencode-copilot-auto.fetch-adapter")
   const runtime = globalThis as typeof globalThis & { [marker]?: true }
   if (runtime[marker]) return
@@ -70,14 +188,18 @@ function installFetchAdapter() {
     const payload = parseJson(body)
     if (!payload || payload.model !== "auto") return originalFetch(input, init)
 
+    if (autoRefresh) sessions.clear()
     const session = await getSession(originalFetch, request.headers)
     const model = await route(originalFetch, request.headers, session, payload)
+    await notify(client as unknown as PluginClient, `Routed to ${model}`)
+    const useResponses = usesResponses(model)
     const headers = new Headers(request.headers)
     headers.set("copilot-session-token", session.token)
+    headers.set("X-GitHub-Api-Version", COPILOT_API_VERSION)
 
-    const next = usesResponses(model) ? toResponsesRequest(payload, model) : { ...payload, model }
-    const url = usesResponses(model) ? toResponsesUrl(request.url) : request.url
-    return originalFetch(
+    const next = useResponses ? toResponsesRequest(payload, model) : { ...payload, model }
+    const url = useResponses ? toResponsesUrl(request.url) : request.url
+    const response = await originalFetch(
       new Request(url, {
         method: request.method,
         headers,
@@ -85,6 +207,7 @@ function installFetchAdapter() {
         signal: request.signal,
       }),
     )
+    return useResponses ? wrapResponsesResponse(response) : response
   }
   globalThis.fetch = Object.assign(adapter, originalFetch)
 }
@@ -100,7 +223,7 @@ function isAutoRequest(request: Request) {
 
 function usesResponses(modelID: string) {
   const match = /^gpt-(\d+)/.exec(modelID)
-  return Boolean(match && Number(match[1]) >= 5 && !modelID.startsWith("gpt-5-mini"))
+  return Boolean(match && Number(match[1]) >= 5)
 }
 
 function toResponsesUrl(url: string) {
@@ -108,13 +231,67 @@ function toResponsesUrl(url: string) {
 }
 
 function toResponsesRequest(payload: Record<string, unknown>, model: string) {
-  const messages = Array.isArray(payload.messages) ? payload.messages : undefined
-  const input = messages ? promptText(messages) : typeof payload.input === "string" ? payload.input : promptText(payload.input)
+  const messages = Array.isArray(payload.messages) ? payload.messages as unknown[] : []
+  const instructions = messages
+    .filter((m) => isRecord(m) && m.role === "system")
+    .map((m) => (isRecord(m) && typeof m.content === "string" ? m.content : ""))
+    .filter(Boolean)
+    .join("\n")
+
+  const input = messages
+    .filter((m) => isRecord(m) && m.role !== "system")
+    .flatMap((m) => {
+      const msg = m as Record<string, unknown>
+      const role = msg.role as string
+      const content = msg.content
+
+      if (role === "tool") {
+        return [{
+          type: "function_call_output",
+          call_id: msg.tool_call_id as string,
+          output: typeof content === "string" ? content : JSON.stringify(content),
+        }]
+      }
+
+      if (role === "assistant" && Array.isArray(msg.tool_calls)) {
+        const items: unknown[] = msg.tool_calls.map((tc) => {
+          if (!isRecord(tc) || !isRecord(tc.function)) return null
+          return {
+            type: "function_call",
+            call_id: tc.id as string,
+            name: tc.function.name as string,
+            arguments: tc.function.arguments as string,
+          }
+        }).filter((x) => x !== null)
+        if (typeof content === "string" && content) {
+          items.unshift({
+            role: "assistant",
+            content: [{ type: "output_text", text: content }],
+          })
+        }
+        return items
+      }
+
+      const text = typeof content === "string"
+        ? content
+        : Array.isArray(content)
+          ? content
+              .map((part) => (isRecord(part) && typeof part.text === "string" ? part.text : ""))
+              .filter(Boolean)
+              .join("\n")
+          : ""
+
+      return [{
+        role,
+        content: [{ type: role === "user" ? "input_text" : "output_text", text }],
+      }]
+    })
 
   return {
     model,
     input,
     stream: payload.stream === true,
+    ...(instructions ? { instructions } : {}),
     ...(typeof payload.temperature === "number" ? { temperature: payload.temperature } : {}),
     ...(typeof payload.top_p === "number" ? { top_p: payload.top_p } : {}),
     ...(typeof payload.max_tokens === "number"
@@ -122,19 +299,112 @@ function toResponsesRequest(payload: Record<string, unknown>, model: string) {
       : typeof payload.max_completion_tokens === "number"
         ? { max_output_tokens: payload.max_completion_tokens }
         : {}),
-    ...(Array.isArray(payload.tools) ? { tools: flattenTools(payload.tools) } : {}),
+    ...(Array.isArray(payload.tools) ? { tools: payload.tools.map(unwrapFunction) } : {}),
     ...(payload.tool_choice !== undefined ? { tool_choice: unwrapFunction(payload.tool_choice) } : {}),
   }
-}
-
-function flattenTools(tools: unknown[]): unknown[] {
-  return tools.map(unwrapFunction)
 }
 
 function unwrapFunction(value: unknown): unknown {
   if (!isRecord(value) || !isRecord(value.function)) return value
   const { function: fn, ...rest } = value
   return { ...fn, ...rest }
+}
+
+function wrapResponsesResponse(response: Response): Response {
+  const chunkId = `chatcmpl-auto-${Date.now()}`
+  const decoder = new TextDecoder()
+  const encoder = new TextEncoder()
+
+  let buffer = ""
+  let toolCallIndex = -1
+
+  const transformed = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const reader = response.body?.getReader()
+      if (!reader) {
+        controller.close()
+        return
+      }
+      // TypeScript cannot narrow reader inside closures, alias to satisfy the type checker
+      const stream = reader
+
+      function emitChunk(delta: Record<string, unknown>, finishReason?: string) {
+        const chunk = {
+          id: chunkId,
+          object: "chat.completion.chunk",
+          choices: [{ index: 0, delta, ...(finishReason ? { finish_reason: finishReason } : {}) }],
+        }
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`))
+      }
+
+      function processLine(line: string) {
+        if (line.startsWith("event:")) return
+        if (!line.startsWith("data:")) return
+        const data = line.slice(5).trim()
+        if (data === "[DONE]") return
+
+        try {
+          const event = JSON.parse(data)
+          const type = event.type as string
+
+          if (type === "response.output_text.delta") {
+            emitChunk({ content: event.delta })
+          } else if (type === "response.output_item.added" && event.item?.type === "function_call") {
+            // ceiling: only function_call items, no file_search/code_interpreter/image_gen
+            toolCallIndex++
+            emitChunk({
+              tool_calls: [{
+                index: toolCallIndex,
+                id: event.item.call_id,
+                type: "function",
+                function: { name: event.item.name, arguments: "" },
+              }],
+            })
+          } else if (type === "response.function_call_arguments.delta") {
+            emitChunk({
+              tool_calls: [{
+                index: toolCallIndex,
+                function: { arguments: event.delta },
+              }],
+            })
+          } else if (type === "response.completed") {
+            emitChunk({}, "stop")
+            controller.enqueue(encoder.encode("data: [DONE]\n\n"))
+          }
+        } catch {
+          // ceiling: malformed SSE lines dropped silently, log for debugging if needed
+        }
+      }
+
+      function pump(): Promise<void> {
+        return stream.read().then(({ done, value }) => {
+          if (done) {
+            if (buffer) {
+              for (const line of buffer.split("\n")) processLine(line)
+            }
+            controller.close()
+            return
+          }
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split("\n")
+          buffer = lines.pop() ?? ""
+          for (const line of lines) processLine(line)
+          return pump()
+        })
+      }
+
+      pump().catch(() => controller.close())
+    },
+  })
+
+  return new Response(transformed, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: new Headers({
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+    }),
+  })
 }
 
 async function getSession(fetcher: typeof fetch, requestHeaders: Headers) {
@@ -182,12 +452,17 @@ async function route(
     body: JSON.stringify({
       prompt,
       available_models: session.availableModels,
-      session_id: "opencode-session://auto",
-      reference_count: 0,
-      prompt_char_count: prompt.length,
-      turn_number: userTurns(messages),
-      routing_method: "hydra",
-      copilot_plan: "individual",
+      has_image: false, // ceiling: hardcoded, detect image parts in payload.messages if needed
+      ...(HYDRA_ROUTING
+        ? {
+            session_id: "opencode-session://auto",
+            reference_count: 0,
+            prompt_char_count: prompt.length,
+            turn_number: userTurns(messages),
+            routing_method: "hydra",
+            copilot_plan: "individual",
+          }
+        : {}),
     }),
     signal: AbortSignal.timeout(5_000),
   })
@@ -199,7 +474,7 @@ async function route(
 
 function copilotHeaders(requestHeaders: Headers) {
   const headers = new Headers(requestHeaders)
-  headers.set("Content-Type", "text/plain;charset=UTF-8")
+  headers.set("Content-Type", "application/json")
   headers.set("X-GitHub-Api-Version", COPILOT_API_VERSION)
   return headers
 }

@@ -17,6 +17,12 @@ Restart OpenCode, authenticate GitHub Copilot if necessary with `opencode auth l
 
 The plugin uses the existing OpenCode GitHub Copilot authentication and sends the prompt to Copilot's routing endpoint solely to select a model.
 
+## Commands
+
+- `/copilot-refresh`: Clears the routing cache so the next prompt selects a fresh model.
+- `/copilot-autorefresh`: Toggles fresh model selection for every prompt. Run it again to resume using the cached routing session.
+- `/copilot-notify`: Toggles notifications between a toast and the projection bus.
+
 ## Development
 
 ```sh
