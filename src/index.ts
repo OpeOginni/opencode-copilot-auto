@@ -39,7 +39,15 @@ async function notifyModelSelected(client: unknown, model: string): Promise<void
 }
 
 export const CopilotAutoPlugin: Plugin = async (input) => {
-  installFetchAdapter(input.client)
+  const client = input.client
+  installFetchAdapter(client)
+
+  async function notify(message: string): Promise<void> {
+    if (!hasToast(client)) return
+    await client.tui!.showToast!({
+      body: { title: "Copilot Auto", message, variant: "info" },
+    }).catch(() => {})
+  }
 
   return {
     provider: {
@@ -60,6 +68,7 @@ export const CopilotAutoPlugin: Plugin = async (input) => {
     "command.execute.before": async (input, output) => {
       if (input.command === "copilot-refresh") {
         sessions.clear()
+        await notify("Routing cache cleared. Next prompt will select a fresh model.")
         output.parts.length = 0
         output.parts.push({
           id: crypto.randomUUID(),
@@ -72,6 +81,11 @@ export const CopilotAutoPlugin: Plugin = async (input) => {
       }
       if (input.command === "copilot-autorefresh") {
         autoRefresh = !autoRefresh
+        await notify(
+          autoRefresh
+            ? "Refresh enabled. Every prompt will select a fresh model."
+            : "Refresh disabled. Reusing cached routing session.",
+        )
         output.parts.length = 0
         output.parts.push({
           id: crypto.randomUUID(),
