@@ -25,3 +25,15 @@ bun run check
 bun run test
 bun run build
 ```
+
+### Remove the latest PR commit
+
+To remove the latest commit from a PR branch while preserving unrelated working-tree changes, reset with `--keep` and force-push with a lease:
+
+```sh
+git reset --keep HEAD^
+git push --force-with-lease=refs/heads/<branch>:<previous-tip> \
+  <fork-url> HEAD:refs/heads/<branch>
+```
+
+Replace `<branch>`, `<previous-tip>`, and `<fork-url>` with the PR source branch, its current remote commit SHA, and the fork URL. The lease prevents overwriting changes pushed by someone else.
