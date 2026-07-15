@@ -22,13 +22,13 @@ let autoRefresh = false
 
 type ToastClient = {
   tui?: {
-    showToast?: (payload: { body: { title: string; message: string; variant: string } }) => Promise<void>
+    showToast?: (payload: { body: { title: string; message: string; variant: string } }) => Promise<unknown>
   }
 }
 
 type BusClient = {
   bus?: {
-    publish?: (payload: { topic: string; body: { key: string; kind: string; content: string } }) => Promise<void>
+    publish?: (payload: { topic: string; body: { key: string; kind: string; content: string } }) => Promise<unknown>
   }
 }
 
@@ -137,7 +137,6 @@ export const CopilotAutoPlugin: Plugin = async (input) => {
           input.sessionID,
           `Copilot Auto notification mode: ${notifyMode}`,
         ))
-        return
       }
     },
   }
@@ -191,13 +190,14 @@ function installFetchAdapter(client?: PluginInput["client"]) {
     if (autoRefresh) sessions.clear()
     const session = await getSession(originalFetch, request.headers)
     const model = await route(originalFetch, request.headers, session, payload)
-    await notify(client as unknown as PluginClient, `Routed to ${model}`)
+    await notify(client as PluginClient, `Routed to ${model}`)
     const useResponses = usesResponses(model)
+    const isChatCompletionsRequest = new URL(request.url).pathname.endsWith("/chat/completions")
     const headers = new Headers(request.headers)
     headers.set("copilot-session-token", session.token)
     headers.set("X-GitHub-Api-Version", COPILOT_API_VERSION)
 
-    const next = useResponses ? toResponsesRequest(payload, model) : { ...payload, model }
+    const next = useResponses && isChatCompletionsRequest ? toResponsesRequest(payload, model) : { ...payload, model }
     const url = useResponses ? toResponsesUrl(request.url) : request.url
     const response = await originalFetch(
       new Request(url, {
@@ -207,7 +207,8 @@ function installFetchAdapter(client?: PluginInput["client"]) {
         signal: request.signal,
       }),
     )
-    return useResponses ? wrapResponsesResponse(response) : response
+    if (!useResponses || !isChatCompletionsRequest) return response
+    return payload.stream === true ? wrapResponsesResponse(response) : toChatCompletionsResponse(response)
   }
   globalThis.fetch = Object.assign(adapter, originalFetch)
 }
@@ -317,6 +318,7 @@ function wrapResponsesResponse(response: Response): Response {
 
   let buffer = ""
   let toolCallIndex = -1
+  let terminated = false
 
   const transformed = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -337,7 +339,14 @@ function wrapResponsesResponse(response: Response): Response {
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`))
       }
 
+      function emitError(message: string) {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: { message, type: "server_error" } })}\n\n`))
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"))
+        terminated = true
+      }
+
       function processLine(line: string) {
+        if (terminated) return
         if (line.startsWith("event:")) return
         if (!line.startsWith("data:")) return
         const data = line.slice(5).trim()
@@ -370,6 +379,11 @@ function wrapResponsesResponse(response: Response): Response {
           } else if (type === "response.completed") {
             emitChunk({}, "stop")
             controller.enqueue(encoder.encode("data: [DONE]\n\n"))
+            terminated = true
+          } else if (type === "response.failed" || type === "response.incomplete") {
+            const details = isRecord(event.response) ? event.response : event
+            const error = isRecord(details.error) ? details.error : details.incomplete_details
+            emitError(isRecord(error) && typeof error.message === "string" ? error.message : `Response ${type.slice(9)}`)
           }
         } catch {
           // ceiling: malformed SSE lines dropped silently, log for debugging if needed
@@ -405,6 +419,41 @@ function wrapResponsesResponse(response: Response): Response {
       "cache-control": "no-cache",
     }),
   })
+}
+
+async function toChatCompletionsResponse(response: Response): Promise<Response> {
+  if (!response.ok) return response
+
+  const data = await response.json() as Record<string, unknown>
+  const output = Array.isArray(data.output) ? data.output : []
+  const content = output.flatMap((item) => {
+    if (!isRecord(item) || !Array.isArray(item.content)) return []
+    return item.content
+      .filter(isRecord)
+      .filter((part) => part.type === "output_text" && typeof part.text === "string")
+      .map((part) => part.text)
+  }).join("")
+  const toolCalls = output
+    .filter(isRecord)
+    .filter((item) => item.type === "function_call")
+    .map((item) => ({
+      id: item.call_id,
+      type: "function",
+      function: { name: item.name, arguments: item.arguments },
+    }))
+
+  return Response.json({
+    id: data.id,
+    object: "chat.completion",
+    created: data.created_at,
+    model: data.model,
+    choices: [{
+      index: 0,
+      message: { role: "assistant", content: content || null, ...(toolCalls.length ? { tool_calls: toolCalls } : {}) },
+      finish_reason: toolCalls.length ? "tool_calls" : "stop",
+    }],
+    ...(isRecord(data.usage) ? { usage: data.usage } : {}),
+  }, { status: response.status, statusText: response.statusText, headers: response.headers })
 }
 
 async function getSession(fetcher: typeof fetch, requestHeaders: Headers) {
@@ -491,6 +540,7 @@ function parseJson(value: string): Record<string, unknown> | undefined {
 }
 
 function promptText(messages: unknown) {
+  if (typeof messages === "string") return messages
   if (!Array.isArray(messages)) return ""
   const message = [...messages].reverse().find((item) => isRecord(item) && item.role === "user")
   if (!message) return ""

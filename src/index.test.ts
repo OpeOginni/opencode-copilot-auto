@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import { CopilotAutoPlugin } from "./index"
 
-async function runAutoRequest(chosenModel: string, body?: Record<string, unknown>) {
+async function runAutoRequest(chosenModel: string, body?: Record<string, unknown>, path = "chat/completions") {
   const calls: Array<{ url: string; body: Record<string, unknown>; headers: Headers }> = []
   const original = globalThis.fetch
   const mock = async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -27,7 +27,7 @@ async function runAutoRequest(chosenModel: string, body?: Record<string, unknown
   await CopilotAutoPlugin({} as never)
 
   try {
-    await fetch("https://api.individual.githubcopilot.com/chat/completions", {
+    await fetch(`https://api.individual.githubcopilot.com/${path}`, {
       method: "POST",
       headers: { Authorization: "Bearer token", "Content-Type": "application/json" },
       body: JSON.stringify(body ?? { model: "auto", messages: [{ role: "user", content: "Fix this bug" }] }),
@@ -72,7 +72,7 @@ async function runAutoRequestWithResponse(chosenModel: string, sseBody: string) 
     return await fetch("https://api.individual.githubcopilot.com/chat/completions", {
       method: "POST",
       headers: { Authorization: "Bearer token", "Content-Type": "application/json" },
-      body: JSON.stringify({ model: "auto", messages: [{ role: "user", content: "Hi" }] }),
+      body: JSON.stringify({ model: "auto", stream: true, messages: [{ role: "user", content: "Hi" }] }),
     })
   } finally {
     globalThis.fetch = original
@@ -170,6 +170,18 @@ test("converts messages with array content", async () => {
   expect(input[0].content[0].text).toBe("hello\nworld")
 })
 
+test("preserves native Responses input", async () => {
+  const calls = await runAutoRequest("gpt-5.4-mini", {
+    model: "auto",
+    input: "Explain this",
+    instructions: "Be concise.",
+  }, "responses")
+  const final = calls.at(-1)!
+  expect(final.url).toBe("https://api.individual.githubcopilot.com/responses")
+  expect(final.body.input).toBe("Explain this")
+  expect(final.body.instructions).toBe("Be concise.")
+})
+
 test("keeps non-GPT auto requests on /chat/completions", async () => {
   const calls = await runAutoRequest("claude-haiku-4.5")
   const final = calls.at(-1)!
@@ -227,6 +239,44 @@ test("transforms Responses API SSE to Chat Completions SSE", async () => {
   expect(chunks[0].choices[0].delta.content).toBe("Hello")
   expect(chunks[1].choices[0].delta.content).toBe(" world")
   expect(chunks[2].choices[0].finish_reason).toBe("stop")
+  expect(text).toContain("data: [DONE]")
+})
+
+test("converts non-streaming Responses JSON to Chat Completions JSON", async () => {
+  const original = globalThis.fetch
+  const mock = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = new Request(input, init)
+    await request.text()
+    if (request.url.endsWith("/models/session")) {
+      return Response.json({ available_models: ["gpt-5.4-mini"], selected_model: "gpt-5.4-mini", session_token: "session-token", expires_at: Math.floor(Date.now() / 1000) + 60 })
+    }
+    if (request.url.endsWith("/models/session/intent")) return Response.json({ chosen_model: "gpt-5.4-mini" })
+    return Response.json({ id: "resp_1", created_at: 1, model: "gpt-5.4-mini", output: [{ type: "message", content: [{ type: "output_text", text: "Hello" }] }] })
+  }
+  globalThis.fetch = Object.assign(mock, original)
+  const marker = Symbol.for("opeoginni.opencode-copilot-auto.fetch-adapter")
+  delete (globalThis as typeof globalThis & { [marker]?: true })[marker]
+  await CopilotAutoPlugin({} as never)
+  try {
+    const response = await fetch("https://api.individual.githubcopilot.com/chat/completions", {
+      method: "POST",
+      headers: { Authorization: "Bearer non-streaming", "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "auto", messages: [{ role: "user", content: "Hi" }] }),
+    })
+    const data = await response.json() as { object: string; choices: Array<{ message: { content: string } }> }
+    expect(data.object).toBe("chat.completion")
+    expect(data.choices[0].message.content).toBe("Hello")
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+test("emits an error and terminal marker for failed Responses streams", async () => {
+  const response = await runAutoRequestWithResponse("gpt-5.4-mini", [
+    'event: response.failed\ndata: {"type":"response.failed","response":{"error":{"message":"Upstream failed"}}}\n\n',
+  ].join(""))
+  const text = await response.text()
+  expect(text).toContain('"message":"Upstream failed"')
   expect(text).toContain("data: [DONE]")
 })
 
