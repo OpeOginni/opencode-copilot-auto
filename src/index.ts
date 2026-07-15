@@ -23,6 +23,25 @@ export const CopilotAutoPlugin: Plugin = async () => {
       id: "github-copilot",
       models: async (provider) => ({ ...provider.models, auto: autoModel() }),
     },
+    config: async (input) => {
+      input.command ??= {}
+      input.command["copilot-refresh"] ??= {
+        template: "/copilot-refresh",
+        description: "Clear Copilot Auto routing cache so the next prompt re-selects a model",
+      }
+    },
+    "command.execute.before": async (input, output) => {
+      if (input.command !== "copilot-refresh") return
+      sessions.clear()
+      output.parts.length = 0
+      output.parts.push({
+        id: crypto.randomUUID(),
+        sessionID: input.sessionID,
+        messageID: crypto.randomUUID(),
+        type: "text",
+        text: "Copilot Auto routing cache cleared. The next prompt will select a fresh model.",
+      })
+    },
   }
 }
 
