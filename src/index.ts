@@ -14,6 +14,7 @@ type CopilotSession = {
 }
 
 const sessions = new Map<string, CopilotSession>()
+let autoRefresh = false
 
 type ToastClient = {
   tui?: {
@@ -51,18 +52,38 @@ export const CopilotAutoPlugin: Plugin = async (input) => {
         template: "/copilot-refresh",
         description: "Clear Copilot Auto routing cache so the next prompt re-selects a model",
       }
+      input.command["copilot-autorefresh"] ??= {
+        template: "/copilot-autorefresh",
+        description: "Toggle automatic model re-selection on every prompt",
+      }
     },
     "command.execute.before": async (input, output) => {
-      if (input.command !== "copilot-refresh") return
-      sessions.clear()
-      output.parts.length = 0
-      output.parts.push({
-        id: crypto.randomUUID(),
-        sessionID: input.sessionID,
-        messageID: crypto.randomUUID(),
-        type: "text",
-        text: "Copilot Auto routing cache cleared. The next prompt will select a fresh model.",
-      })
+      if (input.command === "copilot-refresh") {
+        sessions.clear()
+        output.parts.length = 0
+        output.parts.push({
+          id: crypto.randomUUID(),
+          sessionID: input.sessionID,
+          messageID: crypto.randomUUID(),
+          type: "text",
+          text: "Copilot Auto routing cache cleared. The next prompt will select a fresh model.",
+        })
+        return
+      }
+      if (input.command === "copilot-autorefresh") {
+        autoRefresh = !autoRefresh
+        output.parts.length = 0
+        output.parts.push({
+          id: crypto.randomUUID(),
+          sessionID: input.sessionID,
+          messageID: crypto.randomUUID(),
+          type: "text",
+          text: autoRefresh
+            ? "Copilot Auto refresh enabled. Every prompt will select a fresh model."
+            : "Copilot Auto refresh disabled. Reusing cached routing session.",
+        })
+        return
+      }
     },
   }
 }
@@ -112,6 +133,7 @@ function installFetchAdapter(client?: PluginInput["client"]) {
     const payload = parseJson(body)
     if (!payload || payload.model !== "auto") return originalFetch(input, init)
 
+    if (autoRefresh) sessions.clear()
     const session = await getSession(originalFetch, request.headers)
     const model = await route(originalFetch, request.headers, session, payload)
     await notifyModelSelected(client, model)
