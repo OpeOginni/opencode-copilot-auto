@@ -1,6 +1,6 @@
 {
   "name": "@opeoginni/opencode-copilot-auto",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Add GitHub Copilot Auto model routing to OpenCode",
   "keywords": [
     "opencode",
@@ -11,6 +11,10 @@
   ],
   "license": "MIT",
   "author": "Opeyemi Oginni",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OpeOginni/opencode-copilot-auto.git"
+  },
   "type": "module",
   "files": [
     "dist",
