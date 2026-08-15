@@ -22,13 +22,18 @@ let autoRefresh = false
 
 type ToastClient = {
   tui?: {
-    showToast?: (payload: { body: { title: string; message: string; variant: string } }) => Promise<void>
+    showToast?: (payload: {
+      body: { title: string; message: string; variant: string }
+    }) => Promise<void>
   }
 }
 
 type BusClient = {
   bus?: {
-    publish?: (payload: { topic: string; body: { key: string; kind: string; content: string } }) => Promise<void>
+    publish?: (payload: {
+      topic: string
+      body: { key: string; kind: string; content: string }
+    }) => Promise<void>
   }
 }
 
@@ -107,10 +112,12 @@ export const CopilotAutoPlugin: Plugin = async (input) => {
         sessions.clear()
         await notifyClient("Routing cache cleared. Next prompt will select a fresh model.")
         output.parts.length = 0
-        output.parts.push(makeTextPart(
-          input.sessionID,
-          "Copilot Auto routing cache cleared. The next prompt will select a fresh model.",
-        ))
+        output.parts.push(
+          makeTextPart(
+            input.sessionID,
+            "Copilot Auto routing cache cleared. The next prompt will select a fresh model.",
+          ),
+        )
         return
       }
       if (input.command === "copilot-autorefresh") {
@@ -121,22 +128,23 @@ export const CopilotAutoPlugin: Plugin = async (input) => {
             : "Refresh disabled. Reusing cached routing session.",
         )
         output.parts.length = 0
-        output.parts.push(makeTextPart(
-          input.sessionID,
-          autoRefresh
-            ? "Copilot Auto refresh enabled. Every prompt will select a fresh model."
-            : "Copilot Auto refresh disabled. Reusing cached routing session.",
-        ))
+        output.parts.push(
+          makeTextPart(
+            input.sessionID,
+            autoRefresh
+              ? "Copilot Auto refresh enabled. Every prompt will select a fresh model."
+              : "Copilot Auto refresh disabled. Reusing cached routing session.",
+          ),
+        )
         return
       }
       if (input.command === "copilot-notify") {
         notifyMode = notifyMode === "toast" ? "projection" : "toast"
         await notifyClient(`Notification mode: ${notifyMode}`)
         output.parts.length = 0
-        output.parts.push(makeTextPart(
-          input.sessionID,
-          `Copilot Auto notification mode: ${notifyMode}`,
-        ))
+        output.parts.push(
+          makeTextPart(input.sessionID, `Copilot Auto notification mode: ${notifyMode}`),
+        )
         return
       }
     },
@@ -186,7 +194,7 @@ function installFetchAdapter(client?: PluginInput["client"]) {
 
     const body = await request.clone().text()
     const payload = parseJson(body)
-    if (!payload || payload.model !== "auto") return originalFetch(input, init)
+    if (payload?.model !== "auto") return originalFetch(input, init)
 
     if (autoRefresh) sessions.clear()
     const session = await getSession(originalFetch, request.headers)
@@ -222,8 +230,7 @@ function isAutoRequest(request: Request) {
 }
 
 function usesResponses(modelID: string) {
-  const match = /^gpt-(\d+)/.exec(modelID)
-  return Boolean(match && Number(match[1]) >= 5)
+  return modelID.startsWith("gpt-") || modelID.startsWith("mai-")
 }
 
 function toResponsesUrl(url: string) {
@@ -231,7 +238,7 @@ function toResponsesUrl(url: string) {
 }
 
 function toResponsesRequest(payload: Record<string, unknown>, model: string) {
-  const messages = Array.isArray(payload.messages) ? payload.messages as unknown[] : []
+  const messages = Array.isArray(payload.messages) ? (payload.messages as unknown[]) : []
   const instructions = messages
     .filter((m) => isRecord(m) && m.role === "system")
     .map((m) => (isRecord(m) && typeof m.content === "string" ? m.content : ""))
@@ -246,23 +253,27 @@ function toResponsesRequest(payload: Record<string, unknown>, model: string) {
       const content = msg.content
 
       if (role === "tool") {
-        return [{
-          type: "function_call_output",
-          call_id: msg.tool_call_id as string,
-          output: typeof content === "string" ? content : JSON.stringify(content),
-        }]
+        return [
+          {
+            type: "function_call_output",
+            call_id: msg.tool_call_id as string,
+            output: typeof content === "string" ? content : JSON.stringify(content),
+          },
+        ]
       }
 
       if (role === "assistant" && Array.isArray(msg.tool_calls)) {
-        const items: unknown[] = msg.tool_calls.map((tc) => {
-          if (!isRecord(tc) || !isRecord(tc.function)) return null
-          return {
-            type: "function_call",
-            call_id: tc.id as string,
-            name: tc.function.name as string,
-            arguments: tc.function.arguments as string,
-          }
-        }).filter((x) => x !== null)
+        const items: unknown[] = msg.tool_calls
+          .map((tc) => {
+            if (!isRecord(tc) || !isRecord(tc.function)) return null
+            return {
+              type: "function_call",
+              call_id: tc.id as string,
+              name: tc.function.name as string,
+              arguments: tc.function.arguments as string,
+            }
+          })
+          .filter((x) => x !== null)
         if (typeof content === "string" && content) {
           items.unshift({
             role: "assistant",
@@ -272,19 +283,22 @@ function toResponsesRequest(payload: Record<string, unknown>, model: string) {
         return items
       }
 
-      const text = typeof content === "string"
-        ? content
-        : Array.isArray(content)
+      const text =
+        typeof content === "string"
           ? content
-              .map((part) => (isRecord(part) && typeof part.text === "string" ? part.text : ""))
-              .filter(Boolean)
-              .join("\n")
-          : ""
+          : Array.isArray(content)
+            ? content
+                .map((part) => (isRecord(part) && typeof part.text === "string" ? part.text : ""))
+                .filter(Boolean)
+                .join("\n")
+            : ""
 
-      return [{
-        role,
-        content: [{ type: role === "user" ? "input_text" : "output_text", text }],
-      }]
+      return [
+        {
+          role,
+          content: [{ type: role === "user" ? "input_text" : "output_text", text }],
+        },
+      ]
     })
 
   return {
@@ -300,7 +314,9 @@ function toResponsesRequest(payload: Record<string, unknown>, model: string) {
         ? { max_output_tokens: payload.max_completion_tokens }
         : {}),
     ...(Array.isArray(payload.tools) ? { tools: payload.tools.map(unwrapFunction) } : {}),
-    ...(payload.tool_choice !== undefined ? { tool_choice: unwrapFunction(payload.tool_choice) } : {}),
+    ...(payload.tool_choice !== undefined
+      ? { tool_choice: unwrapFunction(payload.tool_choice) }
+      : {}),
   }
 }
 
@@ -349,23 +365,30 @@ function wrapResponsesResponse(response: Response): Response {
 
           if (type === "response.output_text.delta") {
             emitChunk({ content: event.delta })
-          } else if (type === "response.output_item.added" && event.item?.type === "function_call") {
+          } else if (
+            type === "response.output_item.added" &&
+            event.item?.type === "function_call"
+          ) {
             // ceiling: only function_call items, no file_search/code_interpreter/image_gen
             toolCallIndex++
             emitChunk({
-              tool_calls: [{
-                index: toolCallIndex,
-                id: event.item.call_id,
-                type: "function",
-                function: { name: event.item.name, arguments: "" },
-              }],
+              tool_calls: [
+                {
+                  index: toolCallIndex,
+                  id: event.item.call_id,
+                  type: "function",
+                  function: { name: event.item.name, arguments: "" },
+                },
+              ],
             })
           } else if (type === "response.function_call_arguments.delta") {
             emitChunk({
-              tool_calls: [{
-                index: toolCallIndex,
-                function: { arguments: event.delta },
-              }],
+              tool_calls: [
+                {
+                  index: toolCallIndex,
+                  function: { arguments: event.delta },
+                },
+              ],
             })
           } else if (type === "response.completed") {
             emitChunk({}, "stop")
@@ -410,7 +433,8 @@ function wrapResponsesResponse(response: Response): Response {
 async function getSession(fetcher: typeof fetch, requestHeaders: Headers) {
   const key = requestHeaders.get("authorization") ?? "anonymous"
   const cached = sessions.get(key)
-  if (cached && cached.expiresAt > Math.floor(Date.now() / 1000) + SESSION_REFRESH_BUFFER_SECONDS) return cached
+  if (cached && cached.expiresAt > Math.floor(Date.now() / 1000) + SESSION_REFRESH_BUFFER_SECONDS)
+    return cached
 
   const response = await fetcher(`${COPILOT_BASE_URL}/models/session`, {
     method: "POST",
@@ -418,7 +442,8 @@ async function getSession(fetcher: typeof fetch, requestHeaders: Headers) {
     body: JSON.stringify({ auto_mode: { model_hints: ["auto"] } }),
     signal: AbortSignal.timeout(5_000),
   })
-  if (!response.ok) throw new Error(`Copilot Auto could not create a routing session: ${response.status}`)
+  if (!response.ok)
+    throw new Error(`Copilot Auto could not create a routing session: ${response.status}`)
 
   const data = (await response.json()) as {
     available_models: string[]
@@ -504,7 +529,9 @@ function promptText(messages: unknown) {
 }
 
 function userTurns(messages: unknown) {
-  return Array.isArray(messages) ? messages.filter((item) => isRecord(item) && item.role === "user").length : 0
+  return Array.isArray(messages)
+    ? messages.filter((item) => isRecord(item) && item.role === "user").length
+    : 0
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

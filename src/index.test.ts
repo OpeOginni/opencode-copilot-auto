@@ -17,7 +17,8 @@ async function runAutoRequest(chosenModel: string, body?: Record<string, unknown
         expires_at: Math.floor(Date.now() / 1000) + 60,
       })
     }
-    if (request.url.endsWith("/models/session/intent")) return Response.json({ chosen_model: chosenModel })
+    if (request.url.endsWith("/models/session/intent"))
+      return Response.json({ chosen_model: chosenModel })
     return Response.json({ choices: [] })
   }
 
@@ -30,7 +31,9 @@ async function runAutoRequest(chosenModel: string, body?: Record<string, unknown
     await fetch("https://api.individual.githubcopilot.com/chat/completions", {
       method: "POST",
       headers: { Authorization: "Bearer token", "Content-Type": "application/json" },
-      body: JSON.stringify(body ?? { model: "auto", messages: [{ role: "user", content: "Fix this bug" }] }),
+      body: JSON.stringify(
+        body ?? { model: "auto", messages: [{ role: "user", content: "Fix this bug" }] },
+      ),
     })
   } finally {
     globalThis.fetch = original
@@ -53,7 +56,8 @@ async function runAutoRequestWithResponse(chosenModel: string, sseBody: string) 
         expires_at: Math.floor(Date.now() / 1000) + 60,
       })
     }
-    if (request.url.endsWith("/models/session/intent")) return Response.json({ chosen_model: chosenModel })
+    if (request.url.endsWith("/models/session/intent"))
+      return Response.json({ chosen_model: chosenModel })
     if (request.url.endsWith("/responses")) {
       return new Response(sseBody, {
         status: 200,
@@ -116,28 +120,41 @@ test("converts tool calls in conversation history", async () => {
       { role: "user", content: "What is the weather?" },
       {
         role: "assistant",
-        tool_calls: [{
-          id: "call_1",
-          type: "function",
-          function: { name: "get_weather", arguments: '{"location":"NYC"}' },
-        }],
+        tool_calls: [
+          {
+            id: "call_1",
+            type: "function",
+            function: { name: "get_weather", arguments: '{"location":"NYC"}' },
+          },
+        ],
       },
       { role: "tool", tool_call_id: "call_1", content: "72F sunny" },
     ],
-    tools: [{
-      type: "function",
-      function: {
-        name: "get_weather",
-        description: "Get weather",
-        parameters: { type: "object", properties: {} },
+    tools: [
+      {
+        type: "function",
+        function: {
+          name: "get_weather",
+          description: "Get weather",
+          parameters: { type: "object", properties: {} },
+        },
       },
-    }],
+    ],
   })
   const final = calls.at(-1)!
   expect(final.url).toBe("https://api.individual.githubcopilot.com/responses")
   const input = final.body.input as unknown[]
-  expect(input).toContainEqual({ type: "function_call", call_id: "call_1", name: "get_weather", arguments: '{"location":"NYC"}' })
-  expect(input).toContainEqual({ type: "function_call_output", call_id: "call_1", output: "72F sunny" })
+  expect(input).toContainEqual({
+    type: "function_call",
+    call_id: "call_1",
+    name: "get_weather",
+    arguments: '{"location":"NYC"}',
+  })
+  expect(input).toContainEqual({
+    type: "function_call_output",
+    call_id: "call_1",
+    output: "72F sunny",
+  })
   const tools = final.body.tools as Array<Record<string, unknown>>
   expect(tools[0].name).toBe("get_weather")
   expect(tools[0].function).toBeUndefined()
@@ -162,7 +179,13 @@ test("converts messages with array content", async () => {
   const calls = await runAutoRequest("gpt-5.4-mini", {
     model: "auto",
     messages: [
-      { role: "user", content: [{ type: "text", text: "hello" }, { type: "text", text: "world" }] },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "hello" },
+          { type: "text", text: "world" },
+        ],
+      },
     ],
   })
   const final = calls.at(-1)!
@@ -176,6 +199,13 @@ test("keeps non-GPT auto requests on /chat/completions", async () => {
   expect(final.url).toBe("https://api.individual.githubcopilot.com/chat/completions")
   expect(final.body.model).toBe("claude-haiku-4.5")
   expect(final.headers.get("copilot-session-token")).toBe("session-token")
+})
+
+test("routes mai-code models to /responses", async () => {
+  const calls = await runAutoRequest("mai-code-1.1-flash")
+  const final = calls.at(-1)!
+  expect(final.url).toBe("https://api.individual.githubcopilot.com/responses")
+  expect(final.body.model).toBe("mai-code-1.1-flash")
 })
 
 test("sets X-GitHub-Api-Version on main request", async () => {
@@ -276,7 +306,8 @@ test("reuses cached session on second request", async () => {
         expires_at: Math.floor(Date.now() / 1000) + 60,
       })
     }
-    if (request.url.endsWith("/models/session/intent")) return Response.json({ chosen_model: "gpt-5.4-mini" })
+    if (request.url.endsWith("/models/session/intent"))
+      return Response.json({ chosen_model: "gpt-5.4-mini" })
     return Response.json({ choices: [] })
   }
 
@@ -349,7 +380,8 @@ test("throws when model selection fails", async () => {
         expires_at: Math.floor(Date.now() / 1000) + 60,
       })
     }
-    if (request.url.endsWith("/models/session/intent")) return new Response("error", { status: 500 })
+    if (request.url.endsWith("/models/session/intent"))
+      return new Response("error", { status: 500 })
     return Response.json({})
   }
 
@@ -362,7 +394,10 @@ test("throws when model selection fails", async () => {
   try {
     await fetch("https://api.individual.githubcopilot.com/chat/completions", {
       method: "POST",
-      headers: { Authorization: "Bearer test-route-error-token", "Content-Type": "application/json" },
+      headers: {
+        Authorization: "Bearer test-route-error-token",
+        "Content-Type": "application/json",
+      },
       body: JSON.stringify({ model: "auto", messages: [{ role: "user", content: "Hi" }] }),
     })
   } catch (e) {
