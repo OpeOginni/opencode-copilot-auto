@@ -1,0 +1,16 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [
+    {
+      // Local build. Run `bun run build` first, then `opencode --standalone` here.
+      "package": "./dist",
+      "options": {
+        // false: Copilot picks a model for every prompt (default).
+        // true:  keep the first model Copilot picks for the whole session.
+        "sticky": false,
+        // Toast which model Copilot picked. Once per prompt, or once per session when sticky.
+        "notifications": true
+      }
+    }
+  ]
+}

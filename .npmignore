@@ -1,7 +1,10 @@
 src/
+test/
 opencode.json
+opencode.jsonc
+opencode.example.jsonc
 tsconfig.json
-tsconfig.build.json
+tsup.config.mjs
 bun.lock
+package-lock.json
 .gitignore
-src/copilot/README.md
