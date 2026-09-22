@@ -13,6 +13,7 @@ test("prefers the endpoint Copilot advertises, then the GPT-5 rule", () => {
   expect(endpointFor("claude-sonnet-4.5", endpoints)).toBe("chat")
   expect(endpointFor("gpt-5.3-codex", new Map())).toBe("responses")
   expect(endpointFor("gpt-5-mini", new Map())).toBe("chat")
+  expect(endpointFor("mai-code", new Map())).toBe("responses")
   expect(endpointFor("gpt-4o", new Map())).toBe("chat")
   expect(endpointFor("claude-haiku-4.5", new Map())).toBe("chat")
 })

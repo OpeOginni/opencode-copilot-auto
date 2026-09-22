@@ -31,6 +31,7 @@ export function endpointFor(model: string, endpoints: ReadonlyMap<string, string
   const known = endpoints.get(model)
   if (known === "responses") return "responses"
   if (known === "chat" || known === "messages") return "chat"
+  if (model.startsWith("mai-")) return "responses"
   const match = /^gpt-(\d+)/.exec(model)
   return match && Number(match[1]) >= 5 && !model.startsWith("gpt-5-mini") ? "responses" : "chat"
 }
