@@ -4,6 +4,7 @@ import { Cache } from "./cache.js"
 import { fingerprint, lastUserPrompt, type Prompt } from "./prompt.js"
 import { Router, type Decision, type Fetch } from "./router.js"
 import { CopilotAuto } from "./rpc.js"
+import { tier, TIERS, type Tier } from "./tier.js"
 
 const DEFAULT_BASE_URL = "https://api.githubcopilot.com"
 
@@ -12,6 +13,7 @@ export default Plugin.define({
   async setup(ctx) {
     const sticky = ctx.options.sticky === true
     const notifications = ctx.options.notifications === true
+    const defaultTier = tier(ctx.options.tier)
     // The TUI half of this package listens for `routed` and shows a toast.
     const rpc = notifications ? await ctx.rpc.register(CopilotAuto, {}) : undefined
 
@@ -20,7 +22,8 @@ export default Plugin.define({
     // Last user prompt -> session, so the model wrapper can tell sessions apart.
     const sessions = new Cache<string, string>(500)
     // Routing decisions keyed by session (sticky) or by prompt.
-    const models = new Cache<string, Promise<string>>(500)
+    const models = new Cache<string, Promise<Decision>>(500)
+    const preferences = new Cache<string, { tier?: Tier; revision: number }>(500)
     const routers = new Map<string, Router>()
 
     await ctx.provider.transform((editor) => {
@@ -44,6 +47,7 @@ export default Plugin.define({
         model.name = "Auto"
         model.package = COPILOT_PACKAGE
         model.settings = { ...(typeof baseURL === "string" ? { baseURL } : {}), endpoint: "chat" }
+        model.variants = TIERS.map((id) => ({ id: id as Model.VariantID, settings: { autoTier: id } }))
         model.capabilities = { tools: true, input: ["text", "image"], output: ["text"] }
         model.limit = { context: 128_000, output: 16_384 }
         model.enabled = true
@@ -59,28 +63,48 @@ export default Plugin.define({
     await ctx.session.hook("generate", remember, { providerID: PROVIDER_ID })
     await ctx.session.hook("title", remember, { providerID: PROVIDER_ID })
 
-    const decide = async (router: Router, prompt: Prompt): Promise<Decision> => {
+    const decide = async (
+      router: Router,
+      account: string,
+      selectedTier: Tier | undefined,
+      prompt: Prompt,
+      requestSessionID?: string,
+    ): Promise<Decision> => {
       const prompted = fingerprint(prompt)
-      const sessionID = sessions.get(prompted)
-      const key = sticky ? (sessionID ?? prompted) : prompted
-      const pending =
-        models.get(key) ??
-        models.set(
-          key,
-          router
-            .route(prompt)
-            .then((model) => {
-              // Fresh decision: once per session when sticky, once per prompt otherwise.
-              // Fire-and-forget so the model request never waits on the UI.
-              void rpc?.events.emit("routed", { model, ...(sessionID ? { sessionID } : {}) }).catch(() => {})
-              return model
-            })
-            .catch((error: unknown) => {
-              models.delete(key)
-              throw error
-            }),
-        )
-      return { model: await pending, token: await router.token() }
+      const sessionID = requestSessionID ?? sessions.get(prompted)
+      const scope = JSON.stringify([account, sessionID ?? prompted])
+      const previous = preferences.get(scope)
+      const preference =
+        previous && previous.tier === selectedTier
+          ? previous
+          : preferences.set(scope, { tier: selectedTier, revision: (previous?.revision ?? 0) + 1 })
+      const key = JSON.stringify([scope, selectedTier, preference.revision, sticky ? "sticky" : prompted, prompt.image])
+      let pending = models.get(key)
+      if (pending) {
+        const decision = await pending
+        if (decision.expiresAt !== undefined && decision.expiresAt <= Math.floor(Date.now() / 1000) + 30) {
+          // Another concurrent caller may already have replaced this expired pair.
+          if (models.get(key) === pending) models.delete(key)
+          pending = models.get(key)
+        }
+      }
+      pending ??= models.set(
+        key,
+        router
+          .select(prompt, selectedTier)
+          .then((decision) => {
+            // Fresh decision: also fires after a tier change or token expiry.
+            // Fire-and-forget so the model request never waits on the UI.
+            void rpc?.events.emit("routed", { model: decision.model, ...(sessionID ? { sessionID } : {}) }).catch(() => {})
+            return decision
+          })
+          .catch((error: unknown) => {
+            models.delete(key)
+            throw error
+          }),
+      )
+      const result = await pending
+      return selectedTier ? result : { ...result, token: await router.token() }
     }
 
     await ctx.aisdk.hook(
@@ -97,11 +121,12 @@ export default Plugin.define({
         const key = `${baseURL} ${apiKey}`
         const router = routers.get(key) ?? new Router(baseURL, fetcher(event.options))
         routers.set(key, router)
+        const selectedTier = tier(event.options.autoTier) ?? defaultTier
 
         event.language = autoModel({
           sdk: event.sdk,
           endpoints,
-          decide: (prompt) => decide(router, prompt),
+          decide: (prompt, sessionID) => decide(router, key, selectedTier, prompt, sessionID),
         })
       },
       { providerID: PROVIDER_ID },

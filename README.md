@@ -23,6 +23,21 @@ Each request to `auto` is sent to Copilot's routing endpoint, which picks a mode
 
 Routing happens once per user prompt; tool calls within the same turn reuse the choice.
 
+## Auto tiers
+
+Choose an Auto variant to set Copilot's routing preference:
+
+| Variant | Preference |
+| ------- | ---------- |
+| `efficiency` | Favor cost-efficient models for straightforward tasks. |
+| `balance` | Balance cost, quality, and speed for everyday work. |
+| `intelligence` | Favor higher-quality models for complex tasks. |
+
+For example: `opencode run --model github-copilot/auto#intelligence "Review this design"`.
+Without a variant, routing stays automatic. Set the plugin option `"tier": "intelligence"` for a default preference; a selected variant overrides it. All tiers still adapt to the task and respect your plan and policies. Unavailable tiers report an error rather than silently switching. Changing tiers triggers fresh routing, even with `sticky` enabled.
+
+See [GitHub's Auto tier documentation](https://docs.github.com/en/copilot/concepts/models/auto-model-selection#auto-tier-options).
+
 ## Options
 
 ```jsonc
@@ -38,8 +53,9 @@ Routing happens once per user prompt; tool calls within the same turn reuse the 
 
 | Option          | Default | Description                                                                                                                          |
 | --------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `sticky`        | `false` | `false`: Copilot picks a model for every prompt. `true`: the first model Copilot picks is kept for the whole session.                |
-| `notifications` | `false` | Show a toast naming the model Copilot picked. Fires once per prompt, or once per session when `sticky` is on. Mostly useful while developing. |
+| `sticky`        | `false` | `false`: Copilot picks a model for every prompt. `true`: keep the first choice for the session; tier changes and tier-token refreshes reroute. |
+| `notifications` | `false` | Show a toast naming the model Copilot picked whenever a fresh routing decision is made. Mostly useful while developing. |
+| `tier` | unset | Default Auto tier: `efficiency`, `balance`, or `intelligence`. A selected variant takes precedence. |
 
 OpenCode does not record which model answered on the message itself, so the toast is the only place the choice is visible.
 

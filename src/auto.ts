@@ -39,7 +39,7 @@ export function endpointFor(model: string, endpoints: ReadonlyMap<string, string
 export type AutoModelInput = {
   sdk: CopilotSDK
   endpoints: ReadonlyMap<string, string>
-  decide: (prompt: Prompt) => Promise<Decision>
+  decide: (prompt: Prompt, sessionID?: string) => Promise<Decision>
 }
 
 /**
@@ -48,7 +48,12 @@ export type AutoModelInput = {
  */
 export function autoModel(input: AutoModelInput): LanguageModelV3 {
   const resolve = async (options: LanguageModelV3CallOptions) => {
-    const decision = await input.decide(lastUserPrompt(options.prompt))
+    const headers = new Headers()
+    for (const [name, value] of Object.entries(options.headers ?? {})) {
+      if (value !== undefined) headers.set(name, value)
+    }
+    const sessionID = headers.get("x-interaction-id") ?? headers.get("x-opencode-session-id") ?? undefined
+    const decision = await input.decide(lastUserPrompt(options.prompt), sessionID)
     const endpoint = endpointFor(decision.model, input.endpoints)
     const model = endpoint === "responses" ? input.sdk.responses(decision.model) : input.sdk.chat(decision.model)
     return {

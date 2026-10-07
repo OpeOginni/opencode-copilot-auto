@@ -79,11 +79,25 @@ const copilotModels = [
   { id: "gpt-4.1", package: "aisdk:@ai-sdk/github-copilot", settings: { baseURL: "https://api.individual.githubcopilot.com" } },
 ]
 
-function copilotAPI(chosen: (prompt: string) => string) {
+function copilotAPI(chosen: (prompt: string) => string, expiresIn?: number) {
   const intents: string[] = []
+  const selections: Array<{ prompt: string; tier: string; token: string }> = []
   const fetch = async (request: RequestInfo | URL, init?: RequestInit) => {
     const url = request instanceof URL ? request.href : typeof request === "string" ? request : request.url
     const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>
+    if (url.endsWith("/meta")) {
+      return Response.json({ auto: { tiers: ["efficiency", "balance", "intelligence"].map((id) => ({
+        id, type: "auto", status: { enabled: true },
+      })) } })
+    }
+    if (url.endsWith("/auto")) {
+      const token = `tier-token-${selections.length + 1}`
+      selections.push({ prompt: body.prompt as string, tier: body.tier as string, token })
+      return Response.json({
+        selected_model: { id: chosen(body.prompt as string) }, session_token: token,
+        ...(expiresIn === undefined ? {} : { expires_at: Math.floor(Date.now() / 1000) + expiresIn }),
+      })
+    }
     if (url.endsWith("/models/session")) {
       return Response.json({
         available_models: ["gpt-5.4", "gpt-4.1", "claude-sonnet-4.5"],
@@ -98,7 +112,7 @@ function copilotAPI(chosen: (prompt: string) => string) {
     }
     return new Response("unexpected", { status: 500 })
   }
-  return { intents, fetch }
+  return { intents, selections, fetch }
 }
 
 function fakeSDK() {
@@ -125,13 +139,14 @@ function fakeSDK() {
 
 const message = (text: string) => ({ role: "user" as const, content: [{ type: "text" as const, text }] })
 
-async function boot(input: { sticky?: boolean; notifications?: boolean; chosen?: (prompt: string) => string } = {}) {
+async function boot(input: { sticky?: boolean; notifications?: boolean; tier?: string; expiresIn?: number; chosen?: (prompt: string) => string } = {}) {
   const context = fakeContext({
     ...(input.sticky === undefined ? {} : { sticky: input.sticky }),
     ...(input.notifications === undefined ? {} : { notifications: input.notifications }),
+    ...(input.tier === undefined ? {} : { tier: input.tier }),
   })
   await plugin.setup(context.ctx as never)
-  const api = copilotAPI(input.chosen ?? (() => "gpt-5.4"))
+  const api = copilotAPI(input.chosen ?? (() => "gpt-5.4"), input.expiresIn)
   const fake = fakeSDK()
   const event = {
     model: { providerID: "github-copilot", id: "auto" },
@@ -143,7 +158,12 @@ async function boot(input: { sticky?: boolean; notifications?: boolean; chosen?:
   for (const transform of context.transforms) transform(editor.editor)
   await context.emit("aisdk.language", event)
   if (!event.language) throw new Error("language model was not installed")
-  return { context, api, fake, editor, language: event.language }
+  const variant = async (autoTier?: string, apiKey = "gho_token") => {
+    const selected = { ...event, options: { ...event.options, apiKey, ...(autoTier ? { autoTier } : {}) }, language: undefined as LanguageModelV3 | undefined }
+    await context.emit("aisdk.language", selected)
+    return selected.language!
+  }
+  return { context, api, fake, editor, language: event.language, variant }
 }
 
 test("adds an Auto model cloned from the connected Copilot inventory", async () => {
@@ -154,6 +174,7 @@ test("adds an Auto model cloned from the connected Copilot inventory", async () 
     name: "Auto",
     package: "aisdk:@ai-sdk/github-copilot",
     settings: { baseURL: "https://api.individual.githubcopilot.com", endpoint: "chat" },
+    variants: ["efficiency", "balance", "intelligence"].map((id) => ({ id, settings: { autoTier: id } })),
     capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
     limit: { context: 128_000, output: 16_384 },
     enabled: true,
@@ -292,4 +313,77 @@ test("a failed route is retried on the next call", async () => {
   expect(event.language!.doStream({ prompt: [message("retry me")] })).rejects.toThrow("could not select a model")
   await event.language!.doStream({ prompt: [message("retry me")] })
   expect(fake.created).toEqual(["responses:gpt-5.4"])
+})
+
+test("each Auto variant routes with its own model/token pair and reuses tool continuations", async () => {
+  const { api, fake, variant } = await boot()
+  for (const id of ["efficiency", "balance", "intelligence"]) {
+    const language = await variant(id)
+    await language.doStream({ prompt: [message("same prompt")], headers: { "X-Interaction-Id": "ses_a" } })
+    await language.doStream({ prompt: [message("same prompt")], headers: { "X-Interaction-Id": "ses_a" } })
+  }
+  expect(api.selections.map((selection) => selection.tier)).toEqual(["efficiency", "balance", "intelligence"])
+  expect(api.intents).toEqual([])
+  expect(fake.calls.map((call) => call.headers?.["copilot-session-token"])).toEqual([
+    "tier-token-1", "tier-token-1", "tier-token-2", "tier-token-2", "tier-token-3", "tier-token-3",
+  ])
+})
+
+test("a selected variant overrides the plugin's default tier", async () => {
+  const { api, language, variant } = await boot({ tier: "efficiency" })
+  await language.doStream({ prompt: [message("default")] })
+  await (await variant("intelligence")).doStream({ prompt: [message("override")] })
+  expect(api.selections.map((selection) => selection.tier)).toEqual(["efficiency", "intelligence"])
+})
+
+test("sticky reroutes on tier changes, including switching back and returning to plain Auto", async () => {
+  const { api, variant } = await boot({ sticky: true })
+  const efficiency = await variant("efficiency")
+  const intelligence = await variant("intelligence")
+  const plain = await variant()
+  const run = (language: LanguageModelV3, text: string) => language.doStream({
+    prompt: [message(text)], headers: { "X-Interaction-Id": "ses_a" },
+  })
+  await run(efficiency, "first")
+  await run(efficiency, "second")
+  await run(intelligence, "second")
+  await run(efficiency, "second")
+  await run(plain, "second")
+  expect(api.selections.map((selection) => [selection.tier, selection.prompt])).toEqual([
+    ["efficiency", "first"], ["intelligence", "second"], ["efficiency", "second"],
+  ])
+  expect(api.intents).toEqual(["second"])
+})
+
+test("tier decisions are isolated by session and account, even for identical prompts", async () => {
+  const { api, variant } = await boot({ sticky: true })
+  const first = await variant("balance", "account-a")
+  const second = await variant("balance", "account-b")
+  for (const [language, sessionID] of [[first, "ses_a"], [first, "ses_b"], [second, "ses_a"]] as const) {
+    await language.doStream({ prompt: [message("identical")], headers: { "X-Interaction-Id": sessionID } })
+  }
+  expect(api.selections).toHaveLength(3)
+})
+
+test("concurrent calls share a tier routing decision", async () => {
+  const { api, variant } = await boot()
+  const language = await variant("balance")
+  await Promise.all(Array.from({ length: 3 }, () => language.doStream({ prompt: [message("concurrent")] })))
+  expect(api.selections).toHaveLength(1)
+})
+
+test("invalid plugin tiers fail clearly", async () => {
+  await expect(boot({ tier: "fast" })).rejects.toThrow("tier must be one of")
+})
+
+test("concurrent sticky calls refresh a near-expiry tier model/token pair once", async () => {
+  const { api, fake, variant } = await boot({ sticky: true, expiresIn: 5 })
+  const language = await variant("balance")
+  const run = () => language.doStream({ prompt: [message("expiry")], headers: { "X-Interaction-Id": "ses_a" } })
+  await run()
+  await Promise.all([run(), run(), run()])
+  expect(api.selections).toHaveLength(2)
+  expect(fake.calls.map((call) => call.headers?.["copilot-session-token"])).toEqual([
+    "tier-token-1", "tier-token-2", "tier-token-2", "tier-token-2",
+  ])
 })

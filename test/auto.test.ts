@@ -93,3 +93,19 @@ test("routes then generates through the chat model for other models", async () =
   expect(model.modelId).toBe("auto")
   expect(model.provider).toBe("github-copilot")
 })
+
+test("passes the request's session identity through to routing, case-insensitively", async () => {
+  const fake = fakeSDK()
+  const sessions: Array<string | undefined> = []
+  const model = autoModel({
+    sdk: fake.sdk,
+    endpoints: new Map(),
+    decide: async (_, sessionID) => {
+      sessions.push(sessionID)
+      return { model: "gpt-4.1", token: "token" }
+    },
+  })
+  await model.doGenerate({ ...options, headers: { "X-Interaction-Id": "ses_a", "x-optional": undefined } })
+  await model.doStream({ ...options, headers: { "x-opencode-session-id": "ses_b" } })
+  expect(sessions).toEqual(["ses_a", "ses_b"])
+})
